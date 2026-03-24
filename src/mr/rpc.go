@@ -24,7 +24,21 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type AssignTaskArgs struct {
+}
 
+type AssignTaskReply struct {
+	Task *Task
+	NMap int
+	NReduce int
+}
+
+type ReportTaskArgs struct {
+	Task *Task
+}
+
+type ReportTaskReply struct {
+}
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
 // Can't use the current directory since
