@@ -30,14 +30,30 @@ func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
-	return "", 0, rpc.ErrNoKey
+	args := &rpc.GetArgs{Key: key}
+	reply := &rpc.GetReply{}
+	try := 0
+	ok := ck.clnt.Call(ck.server, "KVServer.Get", args, reply)
+	if ok {
+		return reply.Value, reply.Version, reply.Err
+	} else {
+		for {
+			try++
+			if try > 10 {
+				return "", 0, rpc.ErrMaybe
+			}
+			ok := ck.clnt.Call(ck.server, "KVServer.Get", args, reply)
+			if ok {
+				if reply.Err == rpc.ErrVersion {
+					return "", 0, rpc.ErrMaybe
+				}
+				break
+			}
+		}
+	}
+	return reply.Value, reply.Version, reply.Err
 }
 
-// Put updates key with value only if the version in the
-// request matches the version of the key at the server.  If the
-// versions numbers don't match, the server should return
-// ErrVersion.  If Put receives an ErrVersion on its first RPC, Put
-// should return ErrVersion, since the Put was definitely not
 // performed at the server. If the server returns ErrVersion on a
 // resend RPC, then Put must return ErrMaybe to the application, since
 // its earlier RPC might have been processed by the server successfully
@@ -52,5 +68,30 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return rpc.ErrNoKey
+	args := &rpc.PutArgs{
+		Key:   key,
+		Value: value,
+		Version: version,
+	}
+	reply := &rpc.PutReply{}
+	try := 0
+	ok := ck.clnt.Call(ck.server, "KVServer.Put", args, reply)
+	if ok {
+		return reply.Err
+	} else {
+		for {
+			try++
+			if try > 10 {
+				return rpc.ErrMaybe
+			}
+			ok := ck.clnt.Call(ck.server, "KVServer.Put", args, reply)
+			if ok {
+				if reply.Err == rpc.ErrVersion {
+					return rpc.ErrMaybe
+				}
+				break
+			}
+		}
+	}
+	return reply.Err
 }
