@@ -219,7 +219,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term             int
 	Success          bool
-	ConflictLogIndex int
+	ConflictLogIndex int // 冲突点的索引
 	ConflictLogTerm  int
 }
 
@@ -240,6 +240,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.votedFor = -1
 	rf.persist()
 
+	// 如果PrevLogIndex大于等于当前日志长度，说明PrevLogIndex无效，直接返回
+	if args.PrevLogIndex > len(rf.log)-1 {
+		reply.Success = false
+		// 冲突点为当前日志长度，即有效日志的索引下一个位置
+		reply.ConflictLogIndex = len(rf.log)
+		rf.mu.Unlock()
+		return
+	}
+
+	if args.PrevLogIndex > 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Success = false
+		reply.ConflictLogIndex = args.PrevLogIndex
+		reply.ConflictLogTerm = rf.log[args.PrevLogIndex].Term
+		for reply.ConflictLogIndex >= 0 && rf.log[reply.ConflictLogIndex-1].Term == reply.ConflictLogTerm {
+			reply.ConflictLogIndex--
+		}
+		rf.mu.Unlock()
+		return
+	}
 	if len(args.Entries) == 0 {
 		//log.Printf("%v 收到心跳， term: %v\n, 来自于leader %v\n", rf.me, args.Term, args.LeaderId)
 		reply.Success = true
@@ -249,27 +268,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mu.Unlock()
 		return
 	}
-	if args.PrevLogIndex >= len(rf.log) {
-		reply.Success = false
-		reply.ConflictLogIndex = len(rf.log)
-		rf.mu.Unlock()
-		return
-	}
-
-	if args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.Success = false
-		reply.ConflictLogIndex = args.PrevLogIndex
-		reply.ConflictLogTerm = rf.log[args.PrevLogIndex].Term
-		for reply.ConflictLogIndex >= 0 && rf.log[reply.ConflictLogIndex].Term == reply.ConflictLogTerm {
-			reply.ConflictLogIndex--
-		}
-		rf.mu.Unlock()
-		return
-	}
-
 	reply.Success = true
 	rf.log = rf.log[:args.PrevLogIndex+1]
 	rf.log = append(rf.log, args.Entries...)
+	rf.persist()
 	rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
 	reply.ConflictLogIndex = len(rf.log) - 1
 	rf.mu.Unlock()
@@ -319,11 +321,19 @@ func (rf *Raft) SendHeartbeat() {
 						log.Printf("%v 发现更新的任期, term: %v\n, 来自于leader %v\n", rf.me, reply.Term, reply)
 						rf.mu.Unlock()
 						return
-					} else if reply.Success {
+					}
+					// 任期过时，拒绝
+					if reply.Term != rf.currentTerm {
+						rf.mu.Unlock()
+						return
+					}
+
+					if reply.Success {
 						rf.nextIndex[i] = len(rf.log)
 						rf.matchIndex[i] = len(rf.log) - 1
 					} else {
-						rf.nextIndex[i] = reply.ConflictLogIndex + 1
+						// 有冲突，回滚到冲突点
+						rf.nextIndex[i] = reply.ConflictLogIndex
 					}
 					rf.mu.Unlock()
 				}
@@ -364,6 +374,7 @@ func (rf *Raft) StartElection() {
 	rf.role = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.voteCount = 1
 	rf.ResetHeartbeat()
 	rf.mu.Unlock()
@@ -384,7 +395,7 @@ func (rf *Raft) StartElection() {
 			if ok {
 				if reply.VoteGranted {
 					rf.voteCount++
-					if rf.voteCount > len(rf.peers)/2 {
+					if rf.voteCount > len(rf.peers)/2 && rf.role == Candidate {
 						rf.role = Leader
 						rf.voteCount = 0
 						for j := range rf.peers {
@@ -429,6 +440,7 @@ func (rf *Raft) Applier() {
 		for _, msg := range msgs {
 			rf.applyCh <- msg
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
