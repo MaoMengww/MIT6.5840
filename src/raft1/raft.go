@@ -253,7 +253,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		reply.ConflictLogIndex = args.PrevLogIndex
 		reply.ConflictLogTerm = rf.log[args.PrevLogIndex].Term
-		for reply.ConflictLogIndex >= 0 && rf.log[reply.ConflictLogIndex-1].Term == reply.ConflictLogTerm {
+		for reply.ConflictLogIndex > 0 && rf.log[reply.ConflictLogIndex-1].Term == reply.ConflictLogTerm {
 			reply.ConflictLogIndex--
 		}
 		rf.mu.Unlock()
@@ -304,7 +304,10 @@ func (rf *Raft) SendHeartbeat() {
 					LeaderCommit: rf.commitIndex,
 				}
 				if len(rf.log)-1 >= rf.nextIndex[i] {
-					args.Entries = rf.log[rf.nextIndex[i]:]
+					entries := make([]logEntry, len(rf.log)-rf.nextIndex[i])
+					copy(entries, rf.log[rf.nextIndex[i]:])
+					args.Entries = entries
+					//log.Printf("%v 发送日志给 %v, term: %v\n, entries: %v\n", rf.me, i, rf.currentTerm, entries)
 				} else {
 					args.Entries = nil
 				}
@@ -329,8 +332,9 @@ func (rf *Raft) SendHeartbeat() {
 					}
 
 					if reply.Success {
-						rf.nextIndex[i] = len(rf.log)
-						rf.matchIndex[i] = len(rf.log) - 1
+						// 成功，更新matchIndex和nextIndex
+						rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
+						rf.nextIndex[i] = rf.matchIndex[i] + 1
 					} else {
 						// 有冲突，回滚到冲突点
 						rf.nextIndex[i] = reply.ConflictLogIndex
@@ -363,7 +367,6 @@ func (rf *Raft) UpdateCommitIndex() {
 		}
 		if count > len(rf.peers)/2 {
 			rf.commitIndex = n
-			rf.persist()
 			break
 		}
 	}
