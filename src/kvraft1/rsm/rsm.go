@@ -1,7 +1,6 @@
 package rsm
 
 import (
-	"log"
 	"sync"
 	"time"
 
@@ -10,7 +9,7 @@ import (
 	raft "6.5840/raft1"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
-	"github.com/bwmarrin/snowflake"
+	"github.com/google/uuid"
 )
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
@@ -46,7 +45,6 @@ type RSM struct {
 	// Your definitions here.
 	dead   chan struct{}
 	result map[int64]chan any
-	node   *snowflake.Node
 }
 
 // servers[] contains the ports of the set of
@@ -73,11 +71,6 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		dead:         make(chan struct{}),
 		result:       make(map[int64]chan any),
 	}
-	node, err := snowflake.NewNode(int64(me))
-	if err != nil {
-		log.Fatalf("MakeRSM: %v", err)
-	}
-	rsm.node = node
 	go rsm.reader()
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
@@ -100,13 +93,7 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 
 	// your code here
 	// Extract Id from the request (Req type has Id field)
-	var id int64
-	switch r := req.(type) {
-	case Req:
-		id = r.Id
-	default:
-		id = rsm.node.Generate().Int64()
-	}
+	id := int64(uuid.New().ID())
 	op := Op{Me: rsm.me, Id: id, Req: req}
 	ch := make(chan any)
 	rsm.mu.Lock()
