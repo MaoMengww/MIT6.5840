@@ -1,25 +1,28 @@
 package rsm
 
 import (
+	"log"
 	"sync"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
-	"6.5840/raft1"
+	raft "6.5840/raft1"
 	"6.5840/raftapi"
-	"6.5840/tester1"
-
+	tester "6.5840/tester1"
+	"github.com/bwmarrin/snowflake"
 )
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
-
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Me  int
+	Id  int64
+	Req any
 }
-
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
@@ -41,6 +44,9 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	// Your definitions here.
+	dead   chan struct{}
+	result map[int64]chan any
+	node   *snowflake.Node
 }
 
 // servers[] contains the ports of the set of
@@ -64,7 +70,15 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
+		dead:         make(chan struct{}),
+		result:       make(map[int64]chan any),
 	}
+	node, err := snowflake.NewNode(int64(me))
+	if err != nil {
+		log.Fatalf("MakeRSM: %v", err)
+	}
+	rsm.node = node
+	go rsm.reader()
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
@@ -74,7 +88,6 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
-
 
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
@@ -86,5 +99,57 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// is the argument to Submit and id is a unique id for the op.
 
 	// your code here
-	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	id := rsm.node.Generate().Int64()
+	op := Op{Me: rsm.me, Id: id, Req: req}
+	ch := make(chan any)
+	rsm.mu.Lock()
+	rsm.result[id] = ch
+	rsm.mu.Unlock()
+	_, startTerm, leader := rsm.rf.Start(op)
+	if !leader {
+		return rpc.ErrWrongLeader, nil
+	}
+	for {
+		select {
+		case msg := <-ch:
+			return rpc.OK, msg
+		case <-rsm.dead:
+			return rpc.ErrMaybe, nil
+		default:
+			currentTerm, isLeader := rsm.rf.GetState()
+			if currentTerm != startTerm || !isLeader {
+				rsm.mu.Lock()
+				if cur, ok := rsm.result[id]; ok && cur == ch {
+					delete(rsm.result, id)
+				}
+				rsm.mu.Unlock()
+				return rpc.ErrWrongLeader, nil
+			} else {
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	}
+}
+
+func (rsm *RSM) reader() {
+	for msg := range rsm.applyCh {
+		rsm.mu.Lock()
+		if msg.CommandValid {
+			op := msg.Command.(Op)
+			resp := rsm.sm.DoOp(op.Req)
+			if ch, ok := rsm.result[op.Id]; ok {
+				ch <- resp
+			}
+			rsm.mu.Unlock()
+
+		}
+	}
+	rsm.mu.Lock()
+	defer rsm.mu.Unlock()
+	for id, ch := range rsm.result {
+		close(ch)
+		delete(rsm.result, id)
+	}
+	rsm.dead <- struct{}{}
+	close(rsm.dead)
 }
