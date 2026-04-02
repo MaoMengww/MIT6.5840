@@ -99,7 +99,14 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// is the argument to Submit and id is a unique id for the op.
 
 	// your code here
-	id := rsm.node.Generate().Int64()
+	// Extract Id from the request (Req type has Id field)
+	var id int64
+	switch r := req.(type) {
+	case Req:
+		id = r.Id
+	default:
+		id = rsm.node.Generate().Int64()
+	}
 	op := Op{Me: rsm.me, Id: id, Req: req}
 	ch := make(chan any)
 	rsm.mu.Lock()
@@ -109,13 +116,15 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	if !leader {
 		return rpc.ErrWrongLeader, nil
 	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		select {
 		case msg := <-ch:
 			return rpc.OK, msg
 		case <-rsm.dead:
 			return rpc.ErrMaybe, nil
-		default:
+		case <-ticker.C:
 			currentTerm, isLeader := rsm.rf.GetState()
 			if currentTerm != startTerm || !isLeader {
 				rsm.mu.Lock()
@@ -124,8 +133,6 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 				}
 				rsm.mu.Unlock()
 				return rpc.ErrWrongLeader, nil
-			} else {
-				time.Sleep(50 * time.Millisecond)
 			}
 		}
 	}
@@ -133,23 +140,24 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 
 func (rsm *RSM) reader() {
 	for msg := range rsm.applyCh {
-		rsm.mu.Lock()
 		if msg.CommandValid {
 			op := msg.Command.(Op)
-			resp := rsm.sm.DoOp(op.Req)
-			if ch, ok := rsm.result[op.Id]; ok {
+			resp := rsm.sm.DoOp(op)
+			rsm.mu.Lock()
+			ch, ok := rsm.result[op.Id]
+			rsm.mu.Unlock()
+			if ok {
 				ch <- resp
 			}
-			rsm.mu.Unlock()
 
 		}
 	}
 	rsm.mu.Lock()
-	defer rsm.mu.Unlock()
 	for id, ch := range rsm.result {
 		close(ch)
 		delete(rsm.result, id)
 	}
+	rsm.mu.Unlock()
 	rsm.dead <- struct{}{}
 	close(rsm.dead)
 }

@@ -9,7 +9,6 @@ package raft
 import (
 	//	"bytes"
 	"bytes"
-	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -439,8 +438,42 @@ func (rf *Raft) SendHeartbeat() {
 					return
 				}
 
-				preLogIndex := rf.nextIndex[i] - 1
-				args := &AppendEntriesArgs{
+			preLogIndex := rf.nextIndex[i] - 1
+			if preLogIndex < rf.logBaseIndex || preLogIndex > rf.logBaseIndex+len(rf.log)-1 {
+				if rf.nextIndex[i] <= rf.logBaseIndex {
+					rf.mu.Unlock()
+					return
+				}
+				args := &InstallSnapshotArgs{
+					Term:              rf.currentTerm,
+					LeaderId:          rf.me,
+					LastIncludedIndex: rf.logBaseIndex,
+					LastIncludedTerm:  rf.log[0].Term,
+					Data:              rf.persister.ReadSnapshot(),
+				}
+				reply := &InstallSnapshotReply{}
+				rf.mu.Unlock()
+
+				ok := rf.peers[i].Call("Raft.InstallSnapshot", args, reply)
+				if ok {
+					rf.mu.Lock()
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.votedFor = -1
+						rf.role = Follower
+						rf.persist()
+						rf.mu.Unlock()
+						return
+					}
+					if reply.Term == rf.currentTerm {
+						rf.matchIndex[i] = rf.logBaseIndex
+						rf.nextIndex[i] = rf.logBaseIndex + 1
+					}
+					rf.mu.Unlock()
+				}
+				return
+			}
+			args := &AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
 					PrevLogIndex: rf.nextIndex[i] - 1,
@@ -465,7 +498,7 @@ func (rf *Raft) SendHeartbeat() {
 						rf.votedFor = -1
 						rf.role = Follower
 						rf.persist()
-						log.Printf("%v 发现更新的任期, term: %v\n, 来自于leader %v\n", rf.me, reply.Term, reply)
+//						log.Printf("%v 发现更新的任期, term: %v\n, 来自于leader %v\n", rf.me, reply.Term, reply)
 						rf.mu.Unlock()
 						return
 					}
@@ -490,7 +523,7 @@ func (rf *Raft) SendHeartbeat() {
 			}(i)
 		}
 
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -591,8 +624,11 @@ func (rf *Raft) Applier() {
 			continue
 		}
 		for rf.commitIndex > rf.lastApplied {
+			relIdx := rf.lastApplied + 1 - rf.logBaseIndex
+			if relIdx >= len(rf.log) {
+				break
+			}
 			rf.lastApplied++
-			relIdx := rf.lastApplied - rf.logBaseIndex
 			msgs = append(msgs, raftapi.ApplyMsg{
 				CommandValid: true,
 				Command:      rf.log[relIdx].Command,
